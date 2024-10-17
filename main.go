@@ -1,47 +1,68 @@
 package main
 
 import (
+	"SerialArduinoCommunication/configuration"
+	"SerialArduinoCommunication/handlers"
+	"SerialArduinoCommunication/initializers"
+	"SerialArduinoCommunication/storage"
+	"errors"
 	"fmt"
-	"github.com/tarm/serial"
+	"github.com/easonlin404/limit"
+	"github.com/gin-gonic/gin"
+	cors "github.com/itsjamie/gin-cors"
 	"log"
+	"net/http"
+	"strings"
+	"time"
 )
 
 func main() {
 
-	config := &serial.Config{
-		Name: "/dev/ttyUSB0",
-		Baud: 9600,
+	config := configuration.GetConfig()
+
+	initializers.InitializeRedis()
+	//initializers.InitializeEmailSender()
+
+	err := storage.CreteConnection()
+	if err != nil {
+		log.Fatal(fmt.Sprintf("Server gone away >>> %v", err.Error()))
+
 	}
 
-	message := ""
+	//migrate.MakeMigrations()
 
-	for {
-		fmt.Println("Enter message for adruino")
-		fmt.Println("ON,OFF or quit: ")
-		_, err := fmt.Scanln(&message)
-		if err != nil {
-			fmt.Println("Error reading line")
-		}
-		if message == "quit" {
-			break
-		}
+	gin.SetMode(config.Server.Mode)
+	e := gin.New()
 
-		s, err := serial.OpenPort(config)
-		if err != nil {
-			log.Fatal(err)
-		}
+	// Prepare CORS
+	e.Use(cors.Middleware(cors.Config{
+		Origins:         strings.Join(config.Server.Origin.Cors, ", "),
+		Methods:         "GET, POST, PUT, OPTIONS,DELETE",
+		RequestHeaders:  "Origin, Authorization, Content-Type, X-Http-Auth, X-Last-Page, X-Device",
+		ExposedHeaders:  "",
+		MaxAge:          time.Duration(config.Server.Timeout.Read) * time.Second,
+		Credentials:     false,
+		ValidateHeaders: false,
+	}))
 
-		n, err := s.Write([]byte(message))
-		if err != nil {
-			log.Fatal(err)
-		}
+	e.Use(limit.Limit(500))
 
-		buf := make([]byte, 128)
-		n, err = s.Read(buf)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Printf("%q", buf[:n])
+	e.NoRoute(handlers.NoRouteHandler)
+
+	handlers.HealthCheckHandler(e)
+	handlers.LedHandler(e)
+	handlers.RemoteHandler(e)
+
+	srv := &http.Server{
+		Addr:         fmt.Sprintf("%v:%v", config.Server.Host, config.Server.Port),
+		Handler:      e,
+		ReadTimeout:  time.Duration(config.Server.Timeout.Read) * time.Second,
+		WriteTimeout: time.Duration(config.Server.Timeout.Write) * time.Second,
+	}
+
+	// Run server inside goroutine that will not block signal
+	if err := srv.ListenAndServe(); err != nil && errors.Is(err, http.ErrServerClosed) {
+		panic(fmt.Sprintf("Server gone away >>> %v", err.Error()))
 	}
 
 }
